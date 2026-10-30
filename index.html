@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>रैंडम वीडियो चैट</title>
+<style>
+  body { margin:0; font-family:Arial,sans-serif; background:#111; color:#eee; }
+  #gate { max-width:480px; margin:60px auto; padding:20px; text-align:center; }
+  #app { display:none; height:100vh; flex-direction:column; }
+  #videos { flex:1; display:flex; gap:8px; padding:8px; min-height:0; }
+  .box { flex:1; position:relative; background:#000; border-radius:8px; overflow:hidden; }
+  video { width:100%; height:100%; object-fit:cover; }
+  #status { position:absolute; top:8px; left:8px; background:#0008; padding:4px 10px; border-radius:4px; }
+  #bar { display:flex; gap:8px; padding:8px; flex-wrap:wrap; }
+  button { padding:10px 16px; border:0; border-radius:6px; cursor:pointer; color:#fff; background:#2a7; }
+  button.red { background:#c33; } button.gray { background:#555; }
+  #chatbox { height:110px; overflow:auto; padding:6px 10px; background:#1b1b1b; }
+  #msg { flex:1; padding:10px; min-width:150px; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <h2>रैंडम वीडियो चैट</h2>
+  <p>ये अजनबियों से बात करने की सेवा है। आगे बढ़ने के लिए नीचे की बातें मानें:</p>
+  <p style="text-align:left">
+    <label><input type="checkbox" id="c1"> मेरी उम्र 18 साल या उससे ज़्यादा है।</label><br>
+    <label><input type="checkbox" id="c2"> मैं अश्लील, हिंसक या परेशान करने वाला व्यवहार नहीं करूँगा। ऐसा करने पर बैन हो सकता है।</label><br>
+    <label><input type="checkbox" id="c3"> मैं जानता हूँ कि सामने वाले से निजी जानकारी साझा करना जोखिम भरा है।</label>
+  </p>
+  <button id="enter">शुरू करें</button>
+  <p id="gateErr" style="color:#f66"></p>
+</div>
+
+<div id="app">
+  <div id="videos">
+    <div class="box"><video id="remote" autoplay playsinline></video><div id="status">तैयार</div></div>
+    <div class="box"><video id="local" autoplay playsinline muted></video></div>
+  </div>
+  <div id="chatbox"></div>
+  <div id="bar">
+    <button id="start">खोजें</button>
+    <button id="next" class="gray">अगला</button>
+    <button id="block" class="gray">ब्लॉक</button>
+    <button id="report" class="red">रिपोर्ट</button>
+    <input id="msg" placeholder="संदेश लिखें और Enter दबाएँ">
+  </div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let socket, pc, localStream;
+const ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+$("enter").onclick = async () => {
+  if (!($("c1").checked && $("c2").checked && $("c3").checked)) {
+    $("gateErr").textContent = "तीनों बातों पर टिक करना ज़रूरी है।";
+    return;
+  }
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  } catch (e) {
+    $("gateErr").textContent = "कैमरा और माइक की अनुमति चाहिए।";
+    return;
+  }
+  $("local").srcObject = localStream;
+  $("gate").style.display = "none";
+  $("app").style.display = "flex";
+  connect();
+};
+
+function setStatus(t) { $("status").textContent = t; }
+function addChat(who, t) {
+  const d = document.createElement("div");
+  d.textContent = who + ": " + t;
+  $("chatbox").appendChild(d);
+  $("chatbox").scrollTop = 1e9;
+}
+
+function closePeer() {
+  if (pc) { pc.close(); pc = null; }
+  $("remote").srcObject = null;
+}
+
+function makePeer() {
+  closePeer();
+  pc = new RTCPeerConnection(ICE);
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  pc.ontrack = e => { $("remote").srcObject = e.streams[0]; };
+  pc.onicecandidate = e => { if (e.candidate) socket.emit("signal", { candidate: e.candidate }); };
+  pc.onconnectionstatechange = () => {
+    if (pc && pc.connectionState === "connected") setStatus("जुड़ गए");
+  };
+}
+
+function connect() {
+  socket = io();
+  socket.on("waiting", () => setStatus("किसी के मिलने का इंतज़ार..."));
+  socket.on("matched", async d => {
+    $("chatbox").innerHTML = "";
+    setStatus("जुड़ रहे हैं...");
+    makePeer();
+    if (d.initiator) {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit("signal", { sdp: pc.localDescription });
+    }
+  });
+  socket.on("signal", async d => {
+    if (!pc) makePeer();
+    if (d.sdp) {
+      await pc.setRemoteDescription(d.sdp);
+      if (d.sdp.type === "offer") {
+        const ans = await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        socket.emit("signal", { sdp: pc.localDescription });
+      }
+    } else if (d.candidate) {
+      try { await pc.addIceCandidate(d.candidate); } catch (e) {}
+    }
+  });
+  socket.on("chat", t => addChat("अजनबी", t));
+  socket.on("partner_left", () => { closePeer(); setStatus("सामने वाला चला गया। 'खोजें' दबाएँ।"); });
+  socket.on("stopped", () => { closePeer(); setStatus("रुका। 'खोजें' दबाएँ।"); });
+  socket.on("banned", () => {
+    closePeer();
+    setStatus("आपको रिपोर्ट के कारण 24 घंटे के लिए रोका गया है।");
+  });
+}
+
+$("start").onclick = () => socket.emit("find");
+$("next").onclick = () => { socket.emit("next"); socket.emit("find"); };
+$("block").onclick = () => { socket.emit("block"); setStatus("ब्लॉक किया। 'खोजें' दबाएँ।"); };
+$("report").onclick = () => { socket.emit("report"); setStatus("रिपोर्ट भेजी गई। 'खोजें' दबाएँ।"); };
+$("msg").addEventListener("keydown", e => {
+  if (e.key === "Enter" && e.target.value.trim()) {
+    socket.emit("chat", e.target.value);
+    addChat("मैं", e.target.value);
+    e.target.value = "";
+  }
+});
+</script>
+</body>
+</html>
